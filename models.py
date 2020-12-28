@@ -11,7 +11,7 @@ class Model(nn.Module):
         self.hidden_size = hidden_size
         self.attn_dim = attn_dim
         self.lstm1 = nn.LSTM(in_dim, hidden_size, num_layers=1, batch_first=True, dropout=dropout)
-        self.lstm2 = nn.LSTM(hidden_size, hidden_size, num_layers=1, batch_first=True, dropout=dropout)
+        self.lstm2 = nn.LSTM(hidden_size, hidden_size, num_layers=2, batch_first=True, dropout=dropout)
         self.q_proj = nn.Linear(hidden_size, attn_dim)
         self.k_proj = nn.Linear(hidden_size, attn_dim)
         self.v_proj = nn.Linear(hidden_size, attn_dim)
@@ -19,25 +19,36 @@ class Model(nn.Module):
         self.prediction_out = nn.Linear(hidden_size, out_dim)
         self.attn_dropout = nn.Dropout(p=dropout)
     
-    def forward(self, x, lens):
+    def forward(self, x, lens, attn_mask):
         # x - (batch_size, player, time, dim)
-        # lens - 1-d tensor of lengths
+        # attn_mask - (batch_size, player, time). 1 if should be masked, 0 else.
+        # lens - 1-d tensor of sequence lengths
+
+        #prepare data
         b_size, num_players, time, in_dim = x.shape
         x = x.reshape(-1, time, in_dim)
         lens_stretched = lens.unsqueeze(1).repeat(1, num_players).reshape(-1)
+
+        # encode sequence with 1 layer lstm
         packed_x = nn.utils.rnn.pack_padded_sequence(x, lens_stretched, batch_first=True)
         packed_encoded_input, _ = self.lstm1(packed_x)
         encoded_input, _ = nn.utils.rnn.pad_packed_sequence(packed_encoded_input, batch_first=True)
         encoded_input = encoded_input.reshape(b_size, num_players, time, self.hidden_size).permute(0, 2, 1, 3)
+
+        # attention computation
         q, k, v = self.q_proj(encoded_input), self.k_proj(encoded_input), self.v_proj(encoded_input)
         attn_logit = torch.einsum('btqd,btkd->btqk', q, k) / np.sqrt(self.hidden_size)
-        attn_dist = self.attn_dropout(f.softmax(attn_logit, dim=-1))
+        attn_dist = self.attn_dropout(f.softmax(attn_logit - 1e24*attn_mask.permute(0, 2, 1).unsqueeze(2).repeat(1, 1, num_players, 1), dim=-1))
         combined_vals = torch.einsum('btqk,btkd->btqd', attn_dist, v)
         attn_output = self.attn_out(combined_vals).permute(0, 2, 1, 3)
+        
+        #2 layer lstm over attention outputs
         packed_x2 = nn.utils.rnn.pack_padded_sequence(attn_output.reshape(-1, time, self.hidden_size), lens_stretched, batch_first=True)
         packed_lstm2_output, _ = self.lstm2(packed_x2)
         lstm2_output, _ = nn.utils.rnn.pad_packed_sequence(packed_lstm2_output, batch_first=True)
         lstm2_output = lstm2_output.reshape(b_size, num_players, time, self.hidden_size)
+
+        # final output
         predictions = self.prediction_out(lstm2_output)
         return predictions
 
@@ -52,6 +63,8 @@ class Dataset(torch.utils.data.Dataset):
         self.team_idxs = {'home': 0, 'away': 1, 'football': 2, 'unk': 3}
 
     def __getitem__(self, key):
+        # outputs shape (time, player, dim)
+        # dim = 3, first two corridinates are x and y, the last is team label
         play = self.plays[key]
         frames = self.frames[play]
         xs = []
@@ -76,10 +89,12 @@ class Dataset(torch.utils.data.Dataset):
         return len(self.plays)
 
 if __name__ == '__main__':
+    #training procedure
     dataset = Dataset('data/standardized_week_1_by_play.csv')
     loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=True)
 
     model = Model(256, 256, 34, 4).float()
+    #add embeddings for team, ball label to the model
     model.team_embeddings = nn.Embedding(4, 32)
     model.train()
     epochs = 10
@@ -89,9 +104,14 @@ if __name__ == '__main__':
 
     for epoch in range(epochs):
         for item in loader:
+            #first two items in input data are x, y the third item is a scalar representing team, get the embedding for this scalar and concat with x and y
             input_data = torch.cat([item[:, :, :, :2], model.team_embeddings(item[:, :, :, 2].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
-            output = model(input_data[:, :, :-1, :], torch.tensor([input_data.shape[2]-1]))
-            prediction = input_data[:, :, 1:, :2]
+            attn_mask = (item[:, :, :, 2] == 3).float().permute(0, 2, 1)
+            # outputs 4 things for each time step and each player:
+            # the first 2 are the predicted mean x any y and the last 2 are their standard deviations
+            output = model(input_data[:, :, :-1, :], torch.tensor([input_data.shape[2]-1]), attn_mask[:, :, :-1])
+            truth = input_data[:, :, 1:, :2]
+            # MLE loss function that takes into account variance, can be negative
             loss = torch.mean(torch.sum(torch.sum(((output[:, :, :, :2] - prediction) / torch.exp(output[:, :, :, 2:]))**2 + 2 * output[:, :, :, 2:] + np.log(2 * np.pi), dim=1), dim=-1))
             optim.zero_grad()
             loss.backward()
