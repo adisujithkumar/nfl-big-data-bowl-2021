@@ -113,7 +113,7 @@ if __name__ == '__main__':
             truth = input_data[:, :, 1:, :2]
             prediction_means, prediction_stds = output[:, :, :, :2], output[:, :, :, 2:]
             # MLE loss function that takes into account variance prediction, can be negative (assumes independent gaussians, this is a strong assumption, but outputing a whole covariance matrix would be hard)
-            loss = torch.mean(torch.sum(torch.sum(((prediction_means - truth) / torch.exp(prediction_stds))**2 + 2 * prediction_stds, dim=1), dim=-1))
+            loss = torch.mean(torch.sum(torch.sum(((prediction_means - truth) / torch.exp(prediction_stds))**2 + 2 * prediction_stds, dim=-1) * (1 - attn_mask[:, :, :-1]), dim=1))
             optim.zero_grad()
             loss.backward()
             optim.step()
