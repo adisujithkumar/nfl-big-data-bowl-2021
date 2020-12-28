@@ -100,19 +100,20 @@ if __name__ == '__main__':
     epochs = 10
 
     optim = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
+    
     step = 0
-
     for epoch in range(epochs):
         for item in loader:
-            #first two items in input data are x, y the third item is a scalar representing team, get the embedding for this scalar and concat with x and y
+            # first two items in input data are x, y the third item is a scalar representing team, get the embedding for this scalar and concat with x and y
             input_data = torch.cat([item[:, :, :, :2], model.team_embeddings(item[:, :, :, 2].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
             attn_mask = (item[:, :, :, 2] == 3).float().permute(0, 2, 1)
             # outputs 4 things for each time step and each player:
             # the first 2 are the predicted mean x any y and the last 2 are their standard deviations
             output = model(input_data[:, :, :-1, :], torch.tensor([input_data.shape[2]-1]), attn_mask[:, :, :-1])
             truth = input_data[:, :, 1:, :2]
-            # MLE loss function that takes into account variance, can be negative
-            loss = torch.mean(torch.sum(torch.sum(((output[:, :, :, :2] - prediction) / torch.exp(output[:, :, :, 2:]))**2 + 2 * output[:, :, :, 2:] + np.log(2 * np.pi), dim=1), dim=-1))
+            prediction_means, prediction_stds = output[:, :, :, :2], output[:, :, :, 2:]
+            # MLE loss function that takes into account variance prediction, can be negative (assumes independent gaussians, this is a strong assumption, but outputing a whole covariance matrix would be hard)
+            loss = torch.mean(torch.sum(torch.sum(((prediction_means - truth) / torch.exp(prediction_stds))**2 + 2 * prediction_stds, dim=1), dim=-1))
             optim.zero_grad()
             loss.backward()
             optim.step()
