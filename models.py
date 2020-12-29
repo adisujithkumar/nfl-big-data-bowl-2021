@@ -101,6 +101,7 @@ class Dataset(torch.utils.data.Dataset):
 
 if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print('using device', device)
     #training procedure
     train_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(1, 16)])
     val_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(16, 18)])
@@ -120,8 +121,9 @@ if __name__ == '__main__':
     for epoch in range(epochs):
         for item in train_loader:
             # first two items in input data are x, y the third item is a scalar representing team, get the embedding for this scalar and concat with x and y
-            input_data = torch.cat([item[:, :, :, :2], model.team_embeddings(item[:, :, :, 2].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous().to(device)
-            attn_mask = (item[:, :, :, 2] == 3).float().permute(0, 2, 1).to(device)
+            item = item.to(device)
+            input_data = torch.cat([item[:, :, :, :2], model.team_embeddings(item[:, :, :, 2].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
+            attn_mask = (item[:, :, :, 2] == 3).float().permute(0, 2, 1)
             # outputs 4 things for each time step and each player:
             # the first 2 are the predicted mean x any y and the last 2 are their standard deviations
             output = model(input_data[:, :, :-1, :], torch.tensor([input_data.shape[2]-1]).to(device), attn_mask[:, :, :-1])
