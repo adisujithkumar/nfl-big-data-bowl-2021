@@ -200,8 +200,8 @@ if __name__ == '__main__':
                     print('new best model. saving ...')
                     torch.save(model.state_dict(), os.path.join(wandb.run.dir, 'trajectory_model.pkl'))
                     best_val_loss = total_val_loss
+                    print('saved')
                 model.train()
-
             
             step += 1
 
