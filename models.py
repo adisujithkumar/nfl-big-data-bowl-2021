@@ -116,7 +116,7 @@ def pad_batch(data_batch):
 
 if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    os.environ["WANDB_MODE"] = "dryrun"
+    # os.environ["WANDB_MODE"] = "dryrun"
     wandb.init(project="nfl-big-data-bowl-2021")
     #training procedure
     train_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(1, 2)])
