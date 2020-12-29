@@ -53,25 +53,36 @@ class Model(nn.Module):
         return predictions
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, data_file):
+    def __init__(self, data_files):
         super(Dataset).__init__()
-        self.data_file = data_file
-        with open(self.data_file, 'r') as f:
-            self.data_frame = pd.read_csv(f)
-        self.plays = sorted(set(self.data_frame['playId']))
-        self.frames = {play: sorted(set(self.data_frame.query('playId=={play}'.format(play=play))['frameId'])) for play in self.plays}
+        self.data_files = data_files
+        self.data_frames = []
+        for data_file in self.data_files:
+            with open(data_file, 'r') as f:
+                self.data_frames.append(pd.read_csv(f))
+            print('loaded', data_file)
+        self.plays = [sorted(set(data_frame['playId'])) for data_frame in self.data_frames]
+        self.frames = [{play: sorted(set(self.data_frames[i].query('playId=={play}'.format(play=play))['frameId'])) for play in data_frame} for i, data_frame in enumerate(self.plays)]
         self.team_idxs = {'home': 0, 'away': 1, 'football': 2, 'unk': 3}
+        self.start_idxs = [0]
+        for item in self.plays:
+            self.start_idxs.append(self.start_idxs[-1] + len(item))
 
     def __getitem__(self, key):
         # outputs shape (time, player, dim)
         # dim = 3, first two corridinates are x and y, the last is team label
-        play = self.plays[key]
-        frames = self.frames[play]
+        idx = 0
+        while key >= self.start_idxs[idx]:
+            idx += 1
+        idx -= 1
+        key -= self.start_idxs[idx]
+        play = self.plays[idx][key]
+        frames = self.frames[idx][play]
         xs = []
         ys = []
         teams = []
         for frame in frames:
-            raw_data = self.data_frame.query('playId=={play} & frameId=={frame}'.format(play=play, frame=frame))[['x', 'y', 'team']].values.tolist()
+            raw_data = self.data_frames[idx].query('playId=={play} & frameId=={frame}'.format(play=play, frame=frame))[['x', 'y', 'team']].values.tolist()
             x, y, team = list(zip(*raw_data))
             xs.append([item if not np.isnan(item) else 0.0 for item in x])
             ys.append([item if not np.isnan(item) else 0.0 for item in y])
@@ -86,16 +97,20 @@ class Dataset(torch.utils.data.Dataset):
         return np.stack([xs, ys, teams], axis=-1)
     
     def __len__(self):
-        return len(self.plays)
+        return sum(map(len, self.plays))
 
 if __name__ == '__main__':
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     #training procedure
-    dataset = Dataset('data/standardized_week_1_by_play.csv')
-    loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=True)
+    train_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(1, 16)])
+    val_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(16, 18)])
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=1, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=True)
 
     model = Model(256, 256, 34, 4).float()
     #add embeddings for team, ball label to the model
     model.team_embeddings = nn.Embedding(4, 32)
+    model = model.to(device)
     model.train()
     epochs = 10
 
@@ -103,13 +118,13 @@ if __name__ == '__main__':
     
     step = 0
     for epoch in range(epochs):
-        for item in loader:
+        for item in train_loader:
             # first two items in input data are x, y the third item is a scalar representing team, get the embedding for this scalar and concat with x and y
-            input_data = torch.cat([item[:, :, :, :2], model.team_embeddings(item[:, :, :, 2].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
-            attn_mask = (item[:, :, :, 2] == 3).float().permute(0, 2, 1)
+            input_data = torch.cat([item[:, :, :, :2], model.team_embeddings(item[:, :, :, 2].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous().to(device)
+            attn_mask = (item[:, :, :, 2] == 3).float().permute(0, 2, 1).to(device)
             # outputs 4 things for each time step and each player:
             # the first 2 are the predicted mean x any y and the last 2 are their standard deviations
-            output = model(input_data[:, :, :-1, :], torch.tensor([input_data.shape[2]-1]), attn_mask[:, :, :-1])
+            output = model(input_data[:, :, :-1, :], torch.tensor([input_data.shape[2]-1]).to(device), attn_mask[:, :, :-1])
             truth = input_data[:, :, 1:, :2]
             prediction_means, prediction_stds = output[:, :, :, :2], output[:, :, :, 2:]
             # MLE loss function that takes into account variance prediction, can be negative (assumes independent gaussians, this is a strong assumption, but outputing a whole covariance matrix would be hard)
