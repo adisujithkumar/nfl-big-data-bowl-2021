@@ -4,6 +4,8 @@ import torch
 import numpy as np
 import csv
 import pandas as pd
+import os
+import wandb
 
 class Model(nn.Module):
     def __init__(self, hidden_size, attn_dim, in_dim, out_dim, dropout=0.1):
@@ -30,7 +32,7 @@ class Model(nn.Module):
         lens_stretched = lens.unsqueeze(1).repeat(1, num_players).reshape(-1)
 
         # encode sequence with 1 layer lstm
-        packed_x = nn.utils.rnn.pack_padded_sequence(x, lens_stretched, batch_first=True)
+        packed_x = nn.utils.rnn.pack_padded_sequence(x, lens_stretched, batch_first=True, enforce_sorted=False)
         packed_encoded_input, _ = self.lstm1(packed_x)
         encoded_input, _ = nn.utils.rnn.pad_packed_sequence(packed_encoded_input, batch_first=True)
         encoded_input = encoded_input.reshape(b_size, num_players, time, self.hidden_size).permute(0, 2, 1, 3)
@@ -43,7 +45,7 @@ class Model(nn.Module):
         attn_output = self.attn_out(combined_vals).permute(0, 2, 1, 3)
         
         #2 layer lstm over attention outputs
-        packed_x2 = nn.utils.rnn.pack_padded_sequence(attn_output.reshape(-1, time, self.hidden_size), lens_stretched, batch_first=True)
+        packed_x2 = nn.utils.rnn.pack_padded_sequence(attn_output.reshape(-1, time, self.hidden_size), lens_stretched, batch_first=True, enforce_sorted=False)
         packed_lstm2_output, _ = self.lstm2(packed_x2)
         lstm2_output, _ = nn.utils.rnn.pad_packed_sequence(packed_lstm2_output, batch_first=True)
         lstm2_output = lstm2_output.reshape(b_size, num_players, time, self.hidden_size)
@@ -69,7 +71,7 @@ class Dataset(torch.utils.data.Dataset):
             self.start_idxs.append(self.start_idxs[-1] + len(item))
 
     def __getitem__(self, key):
-        # outputs shape (time, player, dim)
+        # outputs shape (batch=1, time, player, dim)
         # dim = 3, first two corridinates are x and y, the last is team label
         idx = 0
         while key >= self.start_idxs[idx]:
@@ -99,12 +101,27 @@ class Dataset(torch.utils.data.Dataset):
     def __len__(self):
         return sum(map(len, self.plays))
 
+def pad_batch(data_batch):
+    # data_batch - list of data tensors from dataset
+    max_time = max(map(lambda x: x.shape[1], data_batch))
+    max_players = max(map(lambda x: x.shape[2], data_batch))
+    batch_padded = []
+    for batch_item in data_batch:
+        pad1 = torch.zeros((batch_item.shape[0], max_time-batch_item.shape[1], batch_item.shape[2], batch_item.shape[3]))
+        pad1[:, :, :, 2] = 3
+        pad2 = torch.zeros(batch_item.shape[0], max_time, max_players-batch_item.shape[2], batch_item.shape[3])
+        pad2[:, :, :, 2] = 3
+        batch_padded.append(torch.cat([torch.cat([batch_item, pad1], dim=1), pad2], dim=2))
+    return torch.cat(batch_padded, dim=0)
+
 if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print('using device', device)
+    # os.environ["WANDB_MODE"] = "dryrun"
+    wandb.init(project="nfl-big-data-bowl-2021")
     #training procedure
-    train_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(1, 16)])
-    val_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(16, 18)])
+    train_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(1, 2)])
+    val_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(1, 2)])
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=1, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=True)
 
@@ -112,29 +129,80 @@ if __name__ == '__main__':
     #add embeddings for team, ball label to the model
     model.team_embeddings = nn.Embedding(4, 32)
     model = model.to(device)
+    wandb.watch(model)
     model.train()
-    epochs = 10
+    config = wandb.config
+    config.epochs = 10
+    config.bsize = 32
+    config.val_steps = 16
 
     optim = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
     
     step = 0
-    for epoch in range(epochs):
+    best_val_loss = float('inf')
+    curr_batch = []
+    for epoch in range(config.epochs):
         for item in train_loader:
+            # collect batch
+            curr_batch.append(item)
+            if len(curr_batch) < config.bsize:
+                continue
+
+            #pad batch
+            lens = torch.tensor(list(map(lambda x: x.shape[1], curr_batch))).to(device)
+            items = pad_batch(curr_batch)
             # first two items in input data are x, y the third item is a scalar representing team, get the embedding for this scalar and concat with x and y
-            item = item.to(device)
-            input_data = torch.cat([item[:, :, :, :2], model.team_embeddings(item[:, :, :, 2].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
-            attn_mask = (item[:, :, :, 2] == 3).float().permute(0, 2, 1)
+            items = items.to(device)
+            input_data = torch.cat([items[:, :, :, :2], model.team_embeddings(items[:, :, :, 2].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
+            attn_mask = (items[:, :, :, 2] == 3).float().permute(0, 2, 1)
             # outputs 4 things for each time step and each player:
             # the first 2 are the predicted mean x any y and the last 2 are their standard deviations
-            output = model(input_data[:, :, :-1, :], torch.tensor([input_data.shape[2]-1]).to(device), attn_mask[:, :, :-1])
+            output = model(input_data[:, :, :-1, :], lens-1, attn_mask[:, :, :-1])
             truth = input_data[:, :, 1:, :2]
             prediction_means, prediction_stds = output[:, :, :, :2], output[:, :, :, 2:]
             # MLE loss function that takes into account variance prediction, can be negative (assumes independent gaussians, this is a strong assumption, but outputing a whole covariance matrix would be hard)
-            loss = torch.mean(torch.sum(torch.sum(((prediction_means - truth) / torch.exp(prediction_stds))**2 + 2 * prediction_stds, dim=-1) * (1 - attn_mask[:, :, :-1]), dim=1))
+            loss = torch.mean(torch.sum(torch.sum(((prediction_means - truth) / torch.exp(prediction_stds))**2 + 2 * prediction_stds, dim=-1) * (1 - attn_mask[:, :, :-1]) * (1 - attn_mask[:, :, 1:]), dim=1))
             optim.zero_grad()
             loss.backward()
             optim.step()
-            print(epoch, step, loss.item())
+            curr_batch = []
+
+            if step % 10 == 0:
+                # eval model
+                model.eval()
+                val_batch = []
+                total_val_loss = 0.0
+                val_step = 0
+                for val_item in val_loader:
+                    val_batch.append(val_item)
+                    if len(val_batch) < config.bsize:
+                        continue
+                    val_lens = torch.tensor(list(map(lambda x: x.shape[1], val_batch))).to(device)
+                    val_items = pad_batch(val_batch)
+
+                    val_items = val_items.to(device)
+                    val_input_data = torch.cat([val_items[:, :, :, :2], model.team_embeddings(val_items[:, :, :, 2].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
+                    val_attn_mask = (val_items[:, :, :, 2] == 3).float().permute(0, 2, 1)
+                    val_output = model(val_input_data[:, :, :-1, :], val_lens-1, val_attn_mask[:, :, :-1])
+                    val_truth = val_input_data[:, :, 1:, :2]
+                    val_prediction_means, val_prediction_stds = val_output[:, :, :, :2], val_output[:, :, :, 2:]
+                    val_loss = torch.mean(torch.sum(torch.sum(((val_prediction_means - val_truth) / torch.exp(val_prediction_stds))**2 + 2 * val_prediction_stds, dim=-1) * (1 - val_attn_mask[:, :, :-1]) * (1 - val_attn_mask[:, :, 1:]), dim=1))
+                    total_val_loss += val_loss
+                    val_batch = []
+                    val_step += 1
+                    if val_step >= config.val_steps:
+                        break
+                total_val_loss /= config.val_steps
+                print('epoch: {epoch}, step: {step}, train loss: {train_loss}, val loss: {val_loss}'.format(epoch=epoch, step=step, train_loss=loss.item(), val_loss=total_val_loss.item()))
+                wandb.log({'epoch': epoch, 'step': step, 'train_loss': loss.item(), 'val_loss': total_val_loss.item()})
+                # save best model
+                if total_val_loss < best_val_loss:
+                    print('new best model. saving ...')
+                    torch.save(model.state_dict(), os.path.join(wandb.run.dir, 'trajectory_model.pkl'))
+                    best_val_loss = total_val_loss
+                model.train()
+
+            
             step += 1
 
 
