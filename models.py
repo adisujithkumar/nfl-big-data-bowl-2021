@@ -133,7 +133,7 @@ if __name__ == '__main__':
     model.train()
     config = wandb.config
     config.epochs = 10
-    config.bsize = 16
+    config.bsize = 8
     config.val_steps = 16
 
     optim = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
@@ -167,7 +167,7 @@ if __name__ == '__main__':
             optim.step()
             curr_batch = []
 
-            if step % 10 == 0:
+            if step % 100 == 0:
                 # eval model
                 model.eval()
                 val_batch = []
