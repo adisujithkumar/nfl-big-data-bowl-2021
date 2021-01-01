@@ -55,6 +55,13 @@ class Model(nn.Module):
         predictions = self.prediction_out(lstm2_output)
         return predictions
 
+team_idxs = {'home': 0, 'away': 1, 'football': 2, 'unk': 3}
+direction_idxs = {'left': 0, 'right': 1, 'unk': 2}
+position_idxs = {'CB': 0, 'DB': 1, 'DE': 2, 'DL': 3, 'FB': 4, 
+                'FS': 5, 'HB': 6, 'ILB': 7, 'LB': 8, 'MLB': 9, 
+                'NT': 10, 'OLB': 11, 'QB': 12, 'RB': 13, 'S': 14, 
+                'SS': 15, 'TE': 16, 'WR': 17, 'unk': 18}
+
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, data_files):
         super(Dataset).__init__()
@@ -66,7 +73,6 @@ class Dataset(torch.utils.data.Dataset):
             print('loaded', data_file)
         self.plays = [sorted(set(data_frame['playId'])) for data_frame in self.data_frames]
         self.frames = [{play: sorted(set(self.data_frames[i].query('playId=={play}'.format(play=play))['frameId'])) for play in data_frame} for i, data_frame in enumerate(self.plays)]
-        self.team_idxs = {'home': 0, 'away': 1, 'football': 2, 'unk': 3}
         self.start_idxs = [0]
         for item in self.plays:
             self.start_idxs.append(self.start_idxs[-1] + len(item))
@@ -87,29 +93,35 @@ class Dataset(torch.utils.data.Dataset):
         speeds = []
         accelerations = []
         orientations = []
+        directions = []
+        positions = []
         for frame in frames:
-            raw_data = self.data_frames[idx].query('playId=={play} & frameId=={frame}'.format(play=play, frame=frame))[['x', 'y', 'team', 's', 'o', 'a']].values.tolist()
-            x, y, team, s, o, a = list(zip(*raw_data))
+            raw_data = self.data_frames[idx].query('playId=={play} & frameId=={frame}'.format(play=play, frame=frame))[['x', 'y', 'team', 's', 'o', 'a', 'playDirection', 'position']].values.tolist()
+            x, y, team, s, o, a, dir, pos = list(zip(*raw_data))
             xs.append([item if not np.isnan(item) else 0.0 for item in x])
             ys.append([item if not np.isnan(item) else 0.0 for item in y])
-            teams.append([self.team_idxs[item] if item is not None else 3 for item in team])
             speeds.append([item if not np.isnan(item) else 0.0 for item in s])
             accelerations.append([item if not np.isnan(item) else 0.0 for item in a])
             orientations.append([item if not np.isnan(item) else 0.0 for item in o])
+            teams.append([team_idxs[item] if item is not None else team_idxs['unk'] for item in team])
+            directions.append([direction_idxs[item] if item is not None else direction_idxs['unk'] for item in dir])
+            positions.append([position_idxs[item] if item is not None and type(item) is str else position_idxs['unk'] for item in pos])
         max_len = max(map(len, xs))
         xs = [list(x) + [0.0]*(max_len - len(x)) for x in xs]
         ys = [list(y) + [0.0]*(max_len - len(y)) for y in ys]
         speeds = [list(s) + [0.0]*(max_len - len(s)) for s in speeds]
         accelerations = [list(a) + [0.0]*(max_len - len(a)) for a in accelerations]
         orientations = [list(o) + [0.0]*(max_len - len(o)) for o in orientations]
-        teams = [list(team) + [3]*(max_len - len(team)) for team in teams]
+        teams = [list(team) + [team_idxs['unk']]*(max_len - len(team)) for team in teams]
+        directions = [list(direction) + [direction_idxs['unk']]*(max_len - len(direction)) for direction in directions]
+        positions = [list(position) + [position_idxs['unk']]*(max_len - len(position)) for position in positions]
         xs = np.stack(xs, axis=0)
         ys = np.stack(ys, axis=0)
         speeds = np.stack(speeds, axis=0)
         accelerations = np.stack(accelerations, axis=0)
         orientations = np.stack(orientations, axis=0)
         teams = np.stack(teams, axis=0)
-        return np.stack([xs, ys, speeds, accelerations, orientations, teams], axis=-1)
+        return np.stack([xs, ys, speeds, accelerations, orientations, teams, directions, positions], axis=-1)
     
     def __len__(self):
         return sum(map(len, self.plays))
@@ -121,9 +133,13 @@ def pad_batch(data_batch):
     batch_padded = []
     for batch_item in data_batch:
         pad1 = torch.zeros((batch_item.shape[0], max_time-batch_item.shape[1], batch_item.shape[2], batch_item.shape[3]))
-        pad1[:, :, :, 2] = 3
+        pad1[:, :, :, 5] = team_idxs['unk']
+        pad1[:, :, :, 6] = direction_idxs['unk']
+        pad1[:, :, :, 7] = position_idxs['unk']
         pad2 = torch.zeros(batch_item.shape[0], max_time, max_players-batch_item.shape[2], batch_item.shape[3])
-        pad2[:, :, :, 2] = 3
+        pad2[:, :, :, 5] = team_idxs['unk']
+        pad2[:, :, :, 6] = direction_idxs['unk']
+        pad2[:, :, :, 7] = position_idxs['unk']
         batch_padded.append(torch.cat([torch.cat([batch_item, pad1], dim=1), pad2], dim=2))
     return torch.cat(batch_padded, dim=0)
 
@@ -133,14 +149,16 @@ if __name__ == '__main__':
     # os.environ["WANDB_MODE"] = "dryrun"
     wandb.init(project="nfl-big-data-bowl-2021")
     #training procedure
-    train_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(1, 16)])
-    val_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(16, 18)])
+    train_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(1, 2)])
+    val_dataset = Dataset(['data/standardized_week_%d_by_play.csv' % (i) for i in range(2, 3)])
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=1, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=True)
 
-    model = Model(256, 256, 37, 10, 2).float()
+    model = Model(256, 256, 69, 10, 2).float()
     #add embeddings for team, ball label to the model
-    model.team_embeddings = nn.Embedding(4, 32)
+    model.team_embeddings = nn.Embedding(len(team_idxs), 32)
+    model.dir_embeddings = nn.Embedding(len(direction_idxs), 32)
+    model.pos_embeddings = nn.Embedding(len(position_idxs), 32)
     # model.load_state_dict(torch.load('trajectory_model.pkl', map_location='cpu'), strict=False)
     model = model.to(device)
     wandb.watch(model)
@@ -167,8 +185,8 @@ if __name__ == '__main__':
             items = pad_batch(curr_batch)
             # first two items in input data are x, y the third item is a scalar representing team, get the embedding for this scalar and concat with x and y
             items = items.to(device)
-            input_data = torch.cat([items[:, :, :, :5], model.team_embeddings(items[:, :, :, 5].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
-            attn_mask = (items[:, :, :, 5] == 3).float().permute(0, 2, 1)
+            input_data = torch.cat([items[:, :, :, :5], model.team_embeddings(items[:, :, :, 5].long()) + model.dir_embeddings(items[:, :, :, 6].long()), model.pos_embeddings(items[:, :, :, 7].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
+            attn_mask = (items[:, :, :, 5] == team_idxs['unk']).float().permute(0, 2, 1)
             # outputs 4 things for each time step and each player:
             # the first 2 are the predicted mean x any y and the last 2 are their standard deviations
             output = model(input_data[:, :, :-1, :], lens-1, attn_mask[:, :, :-1])
@@ -195,8 +213,8 @@ if __name__ == '__main__':
                     val_items = pad_batch(val_batch)
 
                     val_items = val_items.to(device)
-                    val_input_data = torch.cat([val_items[:, :, :, :5], model.team_embeddings(val_items[:, :, :, 5].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
-                    val_attn_mask = (val_items[:, :, :, 5] == 3).float().permute(0, 2, 1)
+                    val_input_data = torch.cat([val_items[:, :, :, :5], model.team_embeddings(val_items[:, :, :, 5].long()) + model.dir_embeddings(val_items[:, :, :, 6].long()), model.pos_embeddings(val_items[:, :, :, 7].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
+                    val_attn_mask = (val_items[:, :, :, 5] == team_idxs['unk']).float().permute(0, 2, 1)
                     val_output = model(val_input_data[:, :, :-1, :], val_lens-1, val_attn_mask[:, :, :-1])
                     val_truth = val_input_data[:, :, 1:, :5]
                     val_prediction_means, val_prediction_stds = val_output[:, :, :, :5], val_output[:, :, :, 5:]
