@@ -8,7 +8,7 @@ import os
 import wandb
 
 class Model(nn.Module):
-    def __init__(self, hidden_size, attn_dim, in_dim, out_dim, dropout=0.1):
+    def __init__(self, hidden_size, attn_dim, in_dim, out_dim, head2_dim, dropout=0.1):
         super(Model, self).__init__()
         self.hidden_size = hidden_size
         self.attn_dim = attn_dim
@@ -20,6 +20,7 @@ class Model(nn.Module):
         self.attn_out = nn.Linear(attn_dim, hidden_size)
         self.prediction_out = nn.Linear(hidden_size, out_dim)
         self.attn_dropout = nn.Dropout(p=dropout)
+        self.second_head = nn.Linear(hidden_size, head2_dim)
     
     def forward(self, x, lens, attn_mask):
         # x - (batch_size, player, time, dim)
@@ -83,20 +84,32 @@ class Dataset(torch.utils.data.Dataset):
         xs = []
         ys = []
         teams = []
+        speeds = []
+        accelerations = []
+        orientations = []
         for frame in frames:
-            raw_data = self.data_frames[idx].query('playId=={play} & frameId=={frame}'.format(play=play, frame=frame))[['x', 'y', 'team']].values.tolist()
-            x, y, team = list(zip(*raw_data))
+            raw_data = self.data_frames[idx].query('playId=={play} & frameId=={frame}'.format(play=play, frame=frame))[['x', 'y', 'team', 's', 'o', 'a']].values.tolist()
+            x, y, team, s, o, a = list(zip(*raw_data))
             xs.append([item if not np.isnan(item) else 0.0 for item in x])
             ys.append([item if not np.isnan(item) else 0.0 for item in y])
             teams.append([self.team_idxs[item] if item is not None else 3 for item in team])
+            speeds.append([item if not np.isnan(item) else 0.0 for item in s])
+            accelerations.append([item if not np.isnan(item) else 0.0 for item in a])
+            orientations.append([item if not np.isnan(item) else 0.0 for item in o])
         max_len = max(map(len, xs))
         xs = [list(x) + [0.0]*(max_len - len(x)) for x in xs]
         ys = [list(y) + [0.0]*(max_len - len(y)) for y in ys]
+        speeds = [list(s) + [0.0]*(max_len - len(s)) for s in speeds]
+        accelerations = [list(a) + [0.0]*(max_len - len(a)) for a in accelerations]
+        orientations = [list(o) + [0.0]*(max_len - len(o)) for o in orientations]
         teams = [list(team) + [3]*(max_len - len(team)) for team in teams]
         xs = np.stack(xs, axis=0)
         ys = np.stack(ys, axis=0)
+        speeds = np.stack(speeds, axis=0)
+        accelerations = np.stack(accelerations, axis=0)
+        orientations = np.stack(orientations, axis=0)
         teams = np.stack(teams, axis=0)
-        return np.stack([xs, ys, teams], axis=-1)
+        return np.stack([xs, ys, speeds, accelerations, orientations, teams], axis=-1)
     
     def __len__(self):
         return sum(map(len, self.plays))
@@ -125,9 +138,10 @@ if __name__ == '__main__':
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=1, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=True)
 
-    model = Model(256, 256, 34, 4).float()
+    model = Model(256, 256, 37, 10, 2).float()
     #add embeddings for team, ball label to the model
     model.team_embeddings = nn.Embedding(4, 32)
+    # model.load_state_dict(torch.load('trajectory_model.pkl', map_location='cpu'), strict=False)
     model = model.to(device)
     wandb.watch(model)
     model.train()
@@ -153,13 +167,13 @@ if __name__ == '__main__':
             items = pad_batch(curr_batch)
             # first two items in input data are x, y the third item is a scalar representing team, get the embedding for this scalar and concat with x and y
             items = items.to(device)
-            input_data = torch.cat([items[:, :, :, :2], model.team_embeddings(items[:, :, :, 2].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
-            attn_mask = (items[:, :, :, 2] == 3).float().permute(0, 2, 1)
+            input_data = torch.cat([items[:, :, :, :5], model.team_embeddings(items[:, :, :, 5].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
+            attn_mask = (items[:, :, :, 5] == 3).float().permute(0, 2, 1)
             # outputs 4 things for each time step and each player:
             # the first 2 are the predicted mean x any y and the last 2 are their standard deviations
             output = model(input_data[:, :, :-1, :], lens-1, attn_mask[:, :, :-1])
-            truth = input_data[:, :, 1:, :2]
-            prediction_means, prediction_stds = output[:, :, :, :2], output[:, :, :, 2:]
+            truth = input_data[:, :, 1:, :5]
+            prediction_means, prediction_stds = output[:, :, :, :5], output[:, :, :, 5:]
             # MLE loss function that takes into account variance prediction, can be negative (assumes independent gaussians, this is a strong assumption, but outputing a whole covariance matrix would be hard)
             loss = torch.mean(torch.sum(torch.sum(((prediction_means - truth) / torch.exp(prediction_stds))**2 + 2 * prediction_stds, dim=-1) * (1 - attn_mask[:, :, :-1]) * (1 - attn_mask[:, :, 1:]), dim=1))
             optim.zero_grad()
@@ -181,11 +195,11 @@ if __name__ == '__main__':
                     val_items = pad_batch(val_batch)
 
                     val_items = val_items.to(device)
-                    val_input_data = torch.cat([val_items[:, :, :, :2], model.team_embeddings(val_items[:, :, :, 2].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
-                    val_attn_mask = (val_items[:, :, :, 2] == 3).float().permute(0, 2, 1)
+                    val_input_data = torch.cat([val_items[:, :, :, :5], model.team_embeddings(val_items[:, :, :, 5].long())], dim=-1).float().permute(0, 2, 1, 3).contiguous()
+                    val_attn_mask = (val_items[:, :, :, 5] == 3).float().permute(0, 2, 1)
                     val_output = model(val_input_data[:, :, :-1, :], val_lens-1, val_attn_mask[:, :, :-1])
-                    val_truth = val_input_data[:, :, 1:, :2]
-                    val_prediction_means, val_prediction_stds = val_output[:, :, :, :2], val_output[:, :, :, 2:]
+                    val_truth = val_input_data[:, :, 1:, :5]
+                    val_prediction_means, val_prediction_stds = val_output[:, :, :, :5], val_output[:, :, :, 5:]
                     val_loss = torch.mean(torch.sum(torch.sum(((val_prediction_means - val_truth) / torch.exp(val_prediction_stds))**2 + 2 * val_prediction_stds, dim=-1) * (1 - val_attn_mask[:, :, :-1]) * (1 - val_attn_mask[:, :, 1:]), dim=1))
                     total_val_loss += val_loss
                     val_batch = []
