@@ -165,7 +165,7 @@ if __name__ == '__main__':
     model.train()
     config = wandb.config
     config.epochs = 10
-    config.bsize = 16
+    config.bsize = 8
     config.val_steps = 16
 
     optim = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
@@ -181,7 +181,7 @@ if __name__ == '__main__':
                 continue
 
             #pad batch
-            lens = torch.tensor(list(map(lambda x: x.shape[1], curr_batch))).to(device)
+            lens = torch.tensor(list(map(lambda x: x.shape[1], curr_batch))).int().to('cpu')
             items = pad_batch(curr_batch)
             # first two items in input data are x, y the third item is a scalar representing team, get the embedding for this scalar and concat with x and y
             items = items.to(device)
@@ -209,7 +209,7 @@ if __name__ == '__main__':
                     val_batch.append(val_item)
                     if len(val_batch) < config.bsize:
                         continue
-                    val_lens = torch.tensor(list(map(lambda x: x.shape[1], val_batch))).to(device)
+                    val_lens = torch.tensor(list(map(lambda x: x.shape[1], val_batch))).int().to('cpu')
                     val_items = pad_batch(val_batch)
 
                     val_items = val_items.to(device)
