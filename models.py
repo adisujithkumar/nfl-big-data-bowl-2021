@@ -57,10 +57,7 @@ class Model(nn.Module):
 
 team_idxs = {'home': 0, 'away': 1, 'football': 2, 'unk': 3}
 direction_idxs = {'left': 0, 'right': 1, 'unk': 2}
-position_idxs = {'CB': 0, 'DB': 1, 'DE': 2, 'DL': 3, 'FB': 4, 
-                'FS': 5, 'HB': 6, 'ILB': 7, 'LB': 8, 'MLB': 9, 
-                'NT': 10, 'OLB': 11, 'QB': 12, 'RB': 13, 'S': 14, 
-                'SS': 15, 'TE': 16, 'WR': 17, 'unk': 18}
+position_idxs = {'P': 0, 'FB': 1, 'DL': 2, 'FS': 3, 'CB': 4, 'TE': 5, 'DT': 6, 'DB': 7, 'RB': 8, 'LS': 9, 'MLB': 10, 'SS': 11, 'OLB': 12, 'QB': 13, 'DE': 14, 'ILB': 15, 'S': 16, 'LB': 17, 'NT': 18, 'HB': 19, 'K': 20, 'WR': 21, 'unk': 22}
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, data_files):
