@@ -137,7 +137,7 @@ if __name__ == "__main__":
             # the first 2 are the predicted mean x any y and the last 2 are their standard deviations
             output = model(input_data, attn_mask)
             # MLE loss function that takes into account variance prediction, can be negative (assumes independent gaussians, this is a strong assumption, but outputing a whole covariance matrix would be hard)
-            loss = torch.mean((output - truth)**2)
+            loss = torch.mean((output - truth)**2 * (1 - attn_mask))
             optim.zero_grad()
             loss.backward()
             optim.step()
@@ -163,7 +163,7 @@ if __name__ == "__main__":
                     val_input_data = torch.cat([val_items_x[:, :, :5], model.team_embeddings(val_items_x[:, :, 5].long()) + model.dir_embeddings(val_items_x[:, :, 6].long()), model.pos_embeddings(val_items_x[:, :, 7].long())], dim=-1).float().contiguous()
                     val_attn_mask = (val_items_x[:, :, 5] == team_idxs['unk']).float()
                     val_output = model(val_input_data, val_attn_mask)
-                    val_loss = torch.mean((val_output - val_truth)**2)
+                    val_loss = torch.mean((val_output - val_truth)**2 * (1 - val_attn_mask))
                     total_val_loss += val_loss
                     val_batch = []
                     val_step += 1
