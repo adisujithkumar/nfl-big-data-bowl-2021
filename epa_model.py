@@ -35,7 +35,7 @@ class Dataset(torch.utils.data.Dataset):
         self.data_frames = []
         for data_file in self.data_files:
             with open(data_file, 'r') as f:
-                self.data_frames.append(pd.read_csv(f))
+                self.data_frames.append(pd.read_csv(f).query('passResult != "S"'))
             print('loaded', data_file)
         self.plays = [sorted(set(data_frame['playId'])) for data_frame in self.data_frames]
         self.frames = [{play: sorted(set(self.data_frames[i].query('playId=={play}'.format(play=play))['frameId'])) for play in data_frame} for i, data_frame in enumerate(self.plays)]
@@ -43,13 +43,13 @@ class Dataset(torch.utils.data.Dataset):
         for week in range(len(self.frames)):
             for play in self.frames[week]:
                 for frame in self.frames[week][play]:
-                    self.combined_frames.append((week, play, frame))
+                        self.combined_frames.append((week, play, frame))
 
     def __getitem__(self, key):
         # outputs shape (batch=1, player, dim)
         # dim = 3, first two corridinates are x and y, the last is team label
         week, play, frame = self.combined_frames[key]
-        raw_data = self.data_frames[week].query('playId=={play} & frameId=={frame}'.format(play=play, frame=frame))[['x', 'y', 'team', 's', 'o', 'a', 'playDirection', 'position', 'epa']].values.tolist()
+        raw_data = self.data_frames[week].query('playId=={play} & frameId=={frame}'.format(play=play, frame=frame))[['x', 'y', 'team', 's', 'o', 'a', 'playDirection', 'position', 'offensePlayResult']].values.tolist()
         
         x, y, team, s, o, a, dir, pos, epa = list(zip(*raw_data))
         xs = np.array([item if not np.isnan(item) else 0.0 for item in x])
@@ -88,8 +88,8 @@ if __name__ == "__main__":
 
     wandb.init(project="nfl-big-data-bowl-2021-epa-model")
 
-    train_dataset = Dataset(['data/epa-included-week-%d.csv' % (i) for i in range(1, 16)])
-    val_dataset = Dataset(['data/epa-included-week-%d.csv' % (i) for i in range(16, 18)])
+    train_dataset = Dataset(['data/epa-included-week-%d.csv' % (i) for i in range(1, 4)])
+    val_dataset = Dataset(['data/epa-included-week-%d.csv' % (i) for i in range(4, 5)])
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=1, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=True)
 
@@ -107,10 +107,10 @@ if __name__ == "__main__":
     config.bsize = 32
     config.val_steps = 16
 
-    optim = torch.optim.AdamW(model.parameters(), lr=0.01, weight_decay=0.01)
-    # lr_schedule = transformers.get_polynomial_decay_schedule_with_warmup(optim, num_warmup_steps=2000,
-    #                                                                      num_training_steps=(config.epochs*(len(train_dataset)//(config.bsize))),
-    #                                                                      power=1.0, lr_end=0.0)
+    optim = torch.optim.AdamW(model.parameters(), lr=6e-5, weight_decay=0.01, betas=(0.9, 0.98), eps=1e-9)
+    lr_schedule = transformers.get_polynomial_decay_schedule_with_warmup(optim, num_warmup_steps=2000,
+                                                                         num_training_steps=(config.epochs*(len(train_dataset)//(config.bsize))),
+                                                                         power=1.0, lr_end=0.0)
 
     step = 0
     best_val_loss = float('inf')
@@ -138,7 +138,7 @@ if __name__ == "__main__":
             optim.zero_grad()
             loss.backward()
             optim.step()
-            # lr_schedule.step()
+            lr_schedule.step()
             curr_batch_x = []
             curr_batch_y = []
 
